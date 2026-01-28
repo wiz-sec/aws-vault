@@ -6,11 +6,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/99designs/aws-vault/v7/prompt"
-	"github.com/99designs/aws-vault/v7/vault"
-	"github.com/99designs/keyring"
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/byteness/aws-vault/v7/prompt"
+	"github.com/byteness/aws-vault/v7/vault"
+	"github.com/byteness/keyring"
 )
 
 type AddCommandInput struct {
@@ -51,7 +51,7 @@ func ConfigureAddCommand(app *kingpin.Application, a *AwsVault) {
 }
 
 func AddCommand(input AddCommandInput, keyring keyring.Keyring, awsConfigFile *vault.ConfigFile) error {
-	var accessKeyID, secretKey, sessionToken, expiration string
+	var accessKeyID, secretKey, mfaSerial, sessionToken, expiration string
 	var expires time.Time
 
 	p, _ := awsConfigFile.ProfileSection(input.ProfileName)
@@ -87,6 +87,9 @@ func AddCommand(input AddCommandInput, keyring keyring.Keyring, awsConfigFile *v
 		if secretKey, err = prompt.TerminalSecretPrompt("Enter Secret Access Key: "); err != nil {
 			return err
 		}
+		if mfaSerial, err = prompt.TerminalPrompt("Enter MFA Device ARN (If MFA is not enabled, leave this blank): "); err != nil {
+			return err
+		}
 	}
 
 	creds := aws.Credentials{AccessKeyID: accessKeyID, SecretAccessKey: secretKey, SessionToken: sessionToken, Expires: expires}
@@ -106,7 +109,8 @@ func AddCommand(input AddCommandInput, keyring keyring.Keyring, awsConfigFile *v
 	if _, hasProfile := awsConfigFile.ProfileSection(input.ProfileName); !hasProfile {
 		if input.AddConfig {
 			newProfileSection := vault.ProfileSection{
-				Name: input.ProfileName,
+				Name:      input.ProfileName,
+				MfaSerial: mfaSerial,
 			}
 			log.Printf("Adding profile %s to config at %s", input.ProfileName, awsConfigFile.Path)
 			if err := awsConfigFile.Add(newProfileSection); err != nil {
