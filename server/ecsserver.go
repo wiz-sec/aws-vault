@@ -12,10 +12,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/99designs/aws-vault/v7/iso8601"
-	"github.com/99designs/aws-vault/v7/vault"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/byteness/aws-vault/v7/iso8601"
+	"github.com/byteness/aws-vault/v7/vault"
 )
 
 func writeErrorMessage(w http.ResponseWriter, msg string, statusCode int) {
@@ -125,7 +125,7 @@ func (e *EcsServer) getRoleProvider(roleArn string) aws.CredentialsProvider {
 	if ok {
 		roleProviderCache = v.(*aws.CredentialsCache)
 	} else {
-		cfg := vault.NewAwsConfigWithCredsProvider(e.baseCredsProvider, e.config.Region, e.config.STSRegionalEndpoints)
+		cfg := vault.NewAwsConfigWithCredsProvider(e.baseCredsProvider, e.config.Region, e.config.STSRegionalEndpoints, e.config.EndpointURL)
 		roleProvider := &vault.AssumeRoleProvider{
 			StsClient: sts.NewFromConfig(cfg),
 			RoleARN:   roleArn,

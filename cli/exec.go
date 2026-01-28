@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/99designs/aws-vault/v7/iso8601"
-	"github.com/99designs/aws-vault/v7/server"
-	"github.com/99designs/aws-vault/v7/vault"
-	"github.com/99designs/keyring"
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/byteness/aws-vault/v7/iso8601"
+	"github.com/byteness/aws-vault/v7/server"
+	"github.com/byteness/aws-vault/v7/vault"
+	"github.com/byteness/keyring"
 )
 
 type ExecCommandInput struct {
@@ -105,10 +105,12 @@ func ConfigureExecCommand(app *kingpin.Application, a *AwsVault) {
 		BoolVar(&input.Lazy)
 
 	cmd.Flag("stdout", "Print the SSO link to the terminal without automatically opening the browser").
+		OverrideDefaultFromEnvar("AWS_VAULT_STDOUT").
 		BoolVar(&input.UseStdout)
 
 	cmd.Arg("profile", "Name of the profile").
-		Required().
+		//Required().
+		Default(os.Getenv("AWS_PROFILE")).
 		HintAction(a.MustGetProfileNames).
 		StringVar(&input.ProfileName)
 
@@ -132,6 +134,17 @@ func ConfigureExecCommand(app *kingpin.Application, a *AwsVault) {
 		keyring, err := a.Keyring()
 		if err != nil {
 			return err
+		}
+
+		if input.ProfileName == "" {
+			// If no profile provided select from configured AWS profiles
+			ProfileName, err := pickAwsProfile(f.ProfileNames())
+
+			if err != nil {
+				return fmt.Errorf("unable to select a 'profile'. Try --help: %w", err)
+			}
+
+			input.ProfileName = ProfileName
 		}
 
 		exitcode := 0
@@ -183,7 +196,7 @@ func ExecCommand(input ExecCommandInput, f *vault.ConfigFile, keyring keyring.Ke
 		subshellHelp = fmt.Sprintf("Starting subshell %s, use `exit` to exit the subshell", input.Command)
 	}
 
-	cmdEnv := createEnv(input.ProfileName, config.Region)
+	cmdEnv := createEnv(input.ProfileName, config.Region, config.EndpointURL)
 
 	if input.StartEc2Server {
 		if server.IsProxyRunning() {
@@ -236,7 +249,7 @@ func printToStderr(helpMsg string) {
 	fmt.Fprint(os.Stderr, helpMsg, "\n")
 }
 
-func createEnv(profileName string, region string) environ {
+func createEnv(profileName string, region string, endpointURL string) environ {
 	env := environ(os.Environ())
 	env.Unset("AWS_ACCESS_KEY_ID")
 	env.Unset("AWS_SECRET_ACCESS_KEY")
@@ -255,6 +268,11 @@ func createEnv(profileName string, region string) environ {
 		log.Printf("Setting subprocess env: AWS_REGION=%s, AWS_DEFAULT_REGION=%s", region, region)
 		env.Set("AWS_REGION", region)
 		env.Set("AWS_DEFAULT_REGION", region)
+	}
+
+	if endpointURL != "" {
+		log.Printf("Setting subprocess env: AWS_ENDPOINT_URL=%s", endpointURL)
+		env.Set("AWS_ENDPOINT_URL", endpointURL)
 	}
 
 	return env

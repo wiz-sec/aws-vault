@@ -8,16 +8,17 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/99designs/aws-vault/v7/vault"
-	"github.com/99designs/keyring"
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/byteness/aws-vault/v7/vault"
+	"github.com/byteness/keyring"
 	"github.com/skratchdot/open-golang/open"
 )
 
@@ -28,6 +29,7 @@ type LoginCommandInput struct {
 	Config          vault.ProfileConfig
 	SessionDuration time.Duration
 	NoSession       bool
+	AutoLogout      bool
 }
 
 func ConfigureLoginCommand(app *kingpin.Application, a *AwsVault) {
@@ -43,6 +45,11 @@ func ConfigureLoginCommand(app *kingpin.Application, a *AwsVault) {
 		Short('n').
 		BoolVar(&input.NoSession)
 
+	cmd.Flag("auto-logout", "Auto logout when starting a new login").
+		Short('a').
+		Envar("AWS_VAULT_AUTO_LOGOUT").
+		BoolVar(&input.AutoLogout)
+
 	cmd.Flag("mfa-token", "The MFA token to use").
 		Short('t').
 		StringVar(&input.Config.MfaToken)
@@ -54,10 +61,12 @@ func ConfigureLoginCommand(app *kingpin.Application, a *AwsVault) {
 		StringVar(&input.Config.Region)
 
 	cmd.Flag("stdout", "Print login URL to stdout instead of opening in default browser").
+		OverrideDefaultFromEnvar("AWS_VAULT_STDOUT").
 		Short('s').
 		BoolVar(&input.UseStdout)
 
 	cmd.Arg("profile", "Name of the profile. If none given, credentials will be sourced from env vars").
+		Default(os.Getenv("AWS_PROFILE")).
 		HintAction(a.MustGetProfileNames).
 		StringVar(&input.ProfileName)
 
@@ -81,7 +90,7 @@ func ConfigureLoginCommand(app *kingpin.Application, a *AwsVault) {
 	})
 }
 
-func getCredsProvider(input LoginCommandInput, config *vault.ProfileConfig, keyring keyring.Keyring) (credsProvider aws.CredentialsProvider, err error) {
+func getCredsProvider(input LoginCommandInput, config *vault.ProfileConfig, f *vault.ConfigFile, keyring keyring.Keyring) (credsProvider aws.CredentialsProvider, err error) {
 	if input.ProfileName == "" {
 		// When no profile is specified, source credentials from the environment
 		configFromEnv, err := awsconfig.NewEnvConfig()
@@ -90,7 +99,32 @@ func getCredsProvider(input LoginCommandInput, config *vault.ProfileConfig, keyr
 		}
 
 		if configFromEnv.Credentials.AccessKeyID == "" {
-			return nil, fmt.Errorf("argument 'profile' not provided, nor any AWS env vars found. Try --help")
+			// If no credentials from the environment ask for profile
+			ProfileName, err := pickAwsProfile(f.ProfileNames())
+
+			if err != nil {
+				return nil, fmt.Errorf("unable to select a 'profile', nor any AWS env vars found. Try --help: %w", err)
+			}
+
+			// Load config from selected AWS profile
+			config, err := vault.NewConfigLoader(input.Config, f, ProfileName).GetProfileConfig(ProfileName)
+			if err != nil {
+				return nil, fmt.Errorf("Error loading config: %w", err)
+			}
+
+			// Use selected profile from the AWS config file
+			ckr := &vault.CredentialKeyring{Keyring: keyring}
+			t := vault.TempCredentialsCreator{
+				Keyring:                   ckr,
+				DisableSessions:           input.NoSession,
+				DisableSessionsForProfile: config.ProfileName,
+			}
+			credsProvider, err = t.GetProviderForProfile(config)
+			if err != nil {
+				return nil, fmt.Errorf("profile %s: %w", ProfileName, err)
+			}
+
+			return credsProvider, err
 		}
 
 		credsProvider = credentials.StaticCredentialsProvider{Value: configFromEnv.Credentials}
@@ -119,7 +153,7 @@ func LoginCommand(ctx context.Context, input LoginCommandInput, f *vault.ConfigF
 		return fmt.Errorf("Error loading config: %w", err)
 	}
 
-	credsProvider, err := getCredsProvider(input, config, keyring)
+	credsProvider, err := getCredsProvider(input, config, f, keyring)
 	if err != nil {
 		return err
 	}
@@ -168,8 +202,19 @@ func LoginCommand(ctx context.Context, input LoginCommandInput, f *vault.ConfigF
 		return err
 	}
 
-	loginURL := fmt.Sprintf("%s?Action=login&Issuer=aws-vault&Destination=%s&SigninToken=%s",
-		loginURLPrefix, url.QueryEscape(destination), url.QueryEscape(signinToken))
+	var loginURL string
+
+	if input.AutoLogout {
+		// Use logout URL and redirect to login
+		redirectURL := fmt.Sprintf("%s?Action=login&Issuer=aws-vault&Destination=%s&SigninToken=%s",
+			loginURLPrefix, destination, signinToken)
+		loginURL = fmt.Sprintf("https://us-east-1.signin.aws.amazon.com/oauth?Action=logout&redirect_uri=%s",
+			url.QueryEscape(redirectURL))
+	} else {
+		// Go directly to login
+		loginURL = fmt.Sprintf("%s?Action=login&Issuer=aws-vault&Destination=%s&SigninToken=%s",
+			loginURLPrefix, url.QueryEscape(destination), url.QueryEscape(signinToken))
+	}
 
 	if input.UseStdout {
 		fmt.Println(loginURL)
@@ -181,7 +226,7 @@ func LoginCommand(ctx context.Context, input LoginCommandInput, f *vault.ConfigF
 }
 
 func generateLoginURL(region string, path string) (string, string) {
-	loginURLPrefix := "https://signin.aws.amazon.com/federation"
+	loginURLPrefix := "https://us-east-1.signin.aws.amazon.com/federation"
 	destination := "https://console.aws.amazon.com/"
 
 	if region != "" {
@@ -193,6 +238,9 @@ func generateLoginURL(region string, path string) (string, string) {
 		case strings.HasPrefix(region, "us-gov-"):
 			loginURLPrefix = "https://signin.amazonaws-us-gov.com/federation"
 			destinationDomain = "console.amazonaws-us-gov.com"
+		case strings.HasPrefix(region, "eusc-"):
+			loginURLPrefix = "https://signin.amazonaws-eusc.eu/federation" // NOTE: not yet available for aws-eusc
+			destinationDomain = "console.amazonaws-eusc.eu"                // URL for console.aws.eu
 		}
 		if path != "" {
 			destination = fmt.Sprintf("https://%s.%s/%s?region=%s",
@@ -206,7 +254,7 @@ func generateLoginURL(region string, path string) (string, string) {
 }
 
 func isCallerIdentityAssumedRole(ctx context.Context, credsProvider aws.CredentialsProvider, config *vault.ProfileConfig) (bool, error) {
-	cfg := vault.NewAwsConfigWithCredsProvider(credsProvider, config.Region, config.STSRegionalEndpoints)
+	cfg := vault.NewAwsConfigWithCredsProvider(credsProvider, config.Region, config.STSRegionalEndpoints, config.EndpointURL)
 	client := sts.NewFromConfig(cfg)
 	id, err := client.GetCallerIdentity(ctx, nil)
 	if err != nil {

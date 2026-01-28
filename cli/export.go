@@ -8,11 +8,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/99designs/aws-vault/v7/iso8601"
-	"github.com/99designs/aws-vault/v7/vault"
-	"github.com/99designs/keyring"
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/byteness/aws-vault/v7/iso8601"
+	"github.com/byteness/aws-vault/v7/vault"
+	"github.com/byteness/keyring"
 	ini "gopkg.in/ini.v1"
 )
 
@@ -57,10 +57,11 @@ func ConfigureExportCommand(app *kingpin.Application, a *AwsVault) {
 		EnumVar(&input.Format, FormatTypeEnv, FormatTypeExportEnv, FormatTypeExportJSON, FormatTypeExportINI)
 
 	cmd.Flag("stdout", "Print the SSO link to the terminal without automatically opening the browser").
+		OverrideDefaultFromEnvar("AWS_VAULT_STDOUT").
 		BoolVar(&input.UseStdout)
 
 	cmd.Arg("profile", "Name of the profile").
-		Required().
+		//Required().
 		HintAction(a.MustGetProfileNames).
 		StringVar(&input.ProfileName)
 
@@ -77,6 +78,17 @@ func ConfigureExportCommand(app *kingpin.Application, a *AwsVault) {
 		keyring, err := a.Keyring()
 		if err != nil {
 			return err
+		}
+
+		if input.ProfileName == "" {
+			// If no profile provided select from configured AWS profiles
+			ProfileName, err := pickAwsProfile(f.ProfileNames())
+
+			if err != nil {
+				return fmt.Errorf("unable to select a 'profile'. Try --help: %w", err)
+			}
+
+			input.ProfileName = ProfileName
 		}
 
 		err = ExportCommand(input, f, keyring)
